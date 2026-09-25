@@ -1,6 +1,7 @@
 import io
 import re
 import time
+import zipfile
 from datetime import date, timedelta
 
 import numpy as np
@@ -34,6 +35,8 @@ TN_SMART_URLS = [
     "https://tnsmart-beta.rimes.int/index.php/MIS/Rainfall/raingauge_stations/",
     "https://beta-tnsmart.rimes.int/index.php/MIS/Rainfall/raingauge_stations/",
 ]
+
+GITHUB_SHAPEFILE_ZIP = "https://raw.githubusercontent.com/thamizhagavaanilai-hub/tamil-nadu-shape-file/main/Data.zip"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -479,49 +482,91 @@ def accumulate_station_rainfall(daily_df):
 # ============================================================
 # SHAPEFILE
 # ============================================================
-# Explicit import here as well, so Path is always available
-# when Streamlit loads the shapefile section.
 from pathlib import Path as FilePath
+import tempfile
+import zipfile as ShapeZipFile
 
-def load_tamil_nadu_shapefile(uploaded_file=None):
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_tamil_nadu_shapefile():
     """
-    Supports:
-      - Streamlit uploaded ZIP containing .shp/.shx/.dbf/.prj
-      - Local data/tn_districts.shp
+    Automatically downloads the Tamil Nadu district shapefile ZIP
+    from the user's GitHub repository.
+
+    No upload is required on mobile.
     """
-    if uploaded_file is not None:
-        import tempfile
-        import os
-
-        temp_dir = tempfile.mkdtemp(prefix="tn_shape_")
-        zip_path = os.path.join(
-            temp_dir,
-            "shape.zip",
-        )
-
-        with open(zip_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-
-        with zipfile.ZipFile(zip_path, "r") as z:
-            z.extractall(temp_dir)
-
-        shp_files = list(
-            Path(temp_dir).rglob("*.shp")
-        )
-
-        if not shp_files:
-            raise FileNotFoundError(
-                "No .shp file was found inside the ZIP."
-            )
-
-        return gpd.read_file(shp_files[0])
-
+    # First allow a local copy if one exists in the GitHub app repo.
     local_shp = FilePath("data") / "tn_districts.shp"
 
     if local_shp.exists():
-        return gpd.read_file(local_shp)
+        gdf = gpd.read_file(local_shp)
 
-    return None
+        if gdf.crs is None:
+            gdf = gdf.set_crs("EPSG:4326")
+
+        return gdf
+
+    response = requests.get(
+        GITHUB_SHAPEFILE_ZIP,
+        headers={"User-Agent": USER_AGENT},
+        timeout=60,
+    )
+
+    response.raise_for_status()
+
+    if len(response.content) < 1000:
+        raise RuntimeError(
+            "GitHub shapefile ZIP download was unexpectedly small."
+        )
+
+    temp_dir = tempfile.mkdtemp(prefix="tn_github_shape_")
+    zip_path = FilePath(temp_dir) / "Data.zip"
+
+    zip_path.write_bytes(response.content)
+
+    with ShapeZipFile.ZipFile(zip_path, "r") as z:
+        # Basic ZIP integrity check
+        bad_file = z.testzip()
+        if bad_file is not None:
+            raise RuntimeError(
+                f"GitHub shapefile ZIP is corrupted: {bad_file}"
+            )
+
+        z.extractall(temp_dir)
+
+    shp_files = list(
+        FilePath(temp_dir).rglob("*.shp")
+    )
+
+    if not shp_files:
+        raise FileNotFoundError(
+            "No .shp file was found inside the GitHub Data.zip."
+        )
+
+    # If several shapefiles exist, prefer one whose name indicates
+    # Tamil Nadu/district data.
+    preferred = [
+        p for p in shp_files
+        if (
+            "tamil" in p.name.lower()
+            or "tn" in p.name.lower()
+            or "district" in p.name.lower()
+        )
+    ]
+
+    shp_file = preferred[0] if preferred else shp_files[0]
+
+    gdf = gpd.read_file(shp_file)
+
+    if gdf.empty:
+        raise RuntimeError(
+            "The GitHub shapefile was downloaded but contains no features."
+        )
+
+    if gdf.crs is None:
+        gdf = gdf.set_crs("EPSG:4326")
+
+    return gdf
 
 
 # ============================================================
@@ -791,14 +836,6 @@ with st.sidebar:
         step=5,
     )
 
-    uploaded_shape = st.file_uploader(
-        "Optional: upload Tamil Nadu district shapefile ZIP",
-        type=["zip"],
-        help=(
-            "ZIP must contain .shp, .shx, .dbf and preferably .prj"
-        ),
-    )
-
     run_button = st.button(
         "🌧️ Generate Rainfall Map",
         type="primary",
@@ -818,20 +855,14 @@ if start_date > end_date:
 # LOAD SHAPEFILE
 # ============================================================
 try:
-    districts = load_tamil_nadu_shapefile(
-        uploaded_shape
-    )
+    districts = load_tamil_nadu_shapefile()
 except Exception as exc:
     st.error(f"Shapefile error: {exc}")
     st.stop()
 
 if districts is None:
-    st.warning(
-        "Tamil Nadu district shapefile was not found.\n\n"
-        "Put these files inside the GitHub project's `data` folder:\n"
-        "`tn_districts.shp`, `tn_districts.shx`, "
-        "`tn_districts.dbf`, `tn_districts.prj`\n\n"
-        "Or upload a ZIP using the sidebar."
+    st.error(
+        "Tamil Nadu district boundary could not be loaded from GitHub."
     )
     st.stop()
 
@@ -1021,21 +1052,13 @@ else:
 
     st.markdown(
         """
-### 📌 Required GitHub structure
+### 📌 Automatic GitHub boundary
 
-```text
-Tamil-Nadu-Rainfall/
-│
-├── app.py
-├── requirements.txt
-├── README.md
-│
-└── data/
-    ├── tn_districts.shp
-    ├── tn_districts.shx
-    ├── tn_districts.dbf
-    └── tn_districts.prj
-```
+The Tamil Nadu district boundary is automatically downloaded from:
+
+`thamizhagavaanilai-hub/tamil-nadu-shape-file`
+
+You do **not** need to upload a shapefile from your mobile.
 
 ### Data workflow
 
