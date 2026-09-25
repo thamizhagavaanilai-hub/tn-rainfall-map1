@@ -479,6 +479,10 @@ def accumulate_station_rainfall(daily_df):
 # ============================================================
 # SHAPEFILE
 # ============================================================
+# Explicit import here as well, so Path is always available
+# when Streamlit loads the shapefile section.
+from pathlib import Path as FilePath
+
 def load_tamil_nadu_shapefile(uploaded_file=None):
     """
     Supports:
@@ -512,7 +516,7 @@ def load_tamil_nadu_shapefile(uploaded_file=None):
 
         return gpd.read_file(shp_files[0])
 
-    local_shp = Path("data") / "tn_districts.shp"
+    local_shp = FilePath("data") / "tn_districts.shp"
 
     if local_shp.exists():
         return gpd.read_file(local_shp)
