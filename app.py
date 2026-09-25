@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 
 from scipy.spatial import cKDTree
 from shapely.geometry import Point
+from matplotlib.colors import ListedColormap, BoundaryNorm
 
 
 # ============================================================
@@ -807,30 +808,68 @@ def create_rainfall_map(
         dpi=180,
     )
 
-    # Rainfall classes in mm.
+    # ------------------------------------------------------------
+    # RAINFALL COLOUR CLASSES
+    # Based on the supplied Tamil Nadu rainfall colour scheme:
+    # 0–5   WHITE
+    # 5–10  LIGHT GREEN
+    # 10–25 GREEN
+    # 25–50 CYAN
+    # 50–75 BLUE-CYAN
+    # 75–100 BLUE
+    # 100–125 DEEP BLUE
+    # 125–150 YELLOW
+    # 150–175 GOLD
+    # 175–200 ORANGE
+    # 200–225 DARK ORANGE
+    # 225–250 RED
+    # 250–275 DARK RED
+    # 275–300 MAROON
+    # ------------------------------------------------------------
     levels = [
-        0,
-        5,
-        10,
-        15,
-        25,
-        50,
-        75,
-        100,
-        150,
-        200,
-        300,
-        500,
+        0, 5, 10, 25, 50, 75, 100, 125,
+        150, 175, 200, 225, 250, 275, 300
     ]
+
+    rainfall_colors = [
+        "#FFFFFF",   # 0–5
+        "#E8F5E9",   # 5–10
+        "#00A651",   # 10–25
+        "#00C8C8",   # 25–50
+        "#0099CC",   # 50–75
+        "#0066CC",   # 75–100
+        "#0033CC",   # 100–125
+        "#FFFF00",   # 125–150
+        "#FFD000",   # 150–175
+        "#FFA000",   # 175–200
+        "#FF6600",   # 200–225
+        "#FF0000",   # 225–250
+        "#CC0000",   # 250–275
+        "#800000",   # 275–300
+    ]
+
+    rainfall_cmap = ListedColormap(
+        rainfall_colors,
+        name="TN_RAINFALL",
+    )
+    rainfall_norm = BoundaryNorm(
+        levels,
+        rainfall_cmap.N,
+        clip=True,
+    )
+
+    # Keep the plotted range consistent with the supplied 0–300 mm scale.
+    zz_plot = np.clip(zz, 0, 300)
 
     contour = ax.contourf(
         xx,
         yy,
-        zz,
+        zz_plot,
         levels=levels,
-        cmap="Blues",
-        extend="max",
-        alpha=0.82,
+        cmap=rainfall_cmap,
+        norm=rainfall_norm,
+        extend="neither",
+        alpha=0.88,
     )
 
     # District boundaries
@@ -880,12 +919,16 @@ def create_rainfall_map(
         ax=ax,
         shrink=0.72,
         pad=0.03,
+        boundaries=levels,
+        ticks=levels,
+        spacing="proportional",
     )
 
     cbar.set_label(
         "Accumulated Rainfall (mm)",
         fontsize=10,
     )
+    cbar.ax.tick_params(labelsize=8, length=3, width=0.6)
 
     ax.set_aspect("equal")
 
