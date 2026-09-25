@@ -880,16 +880,46 @@ def create_rainfall_map(
         alpha=0.75,
     )
 
-    # Station points
-    ax.scatter(
-        stations["longitude"],
-        stations["latitude"],
-        s=8,
-        c="black",
-        alpha=0.65,
-        linewidths=0,
-        zorder=5,
-    )
+    # Station points are intentionally not displayed.
+
+    # District names
+    district_field = None
+    preferred_fields = [
+        "dtname", "district", "district_name", "districtname",
+        "dt_name", "name"
+    ]
+    for field in preferred_fields:
+        if field in districts.columns:
+            district_field = field
+            break
+    if district_field is None:
+        for field in districts.columns:
+            text = normalize_column_name(field)
+            if "district" in text or text == "dtname":
+                district_field = field
+                break
+
+    if district_field is not None:
+        for _, row in districts.iterrows():
+            try:
+                point = row.geometry.representative_point()
+                name = str(row[district_field]).strip()
+                if not name or name.lower() == "nan":
+                    continue
+                label = ax.text(
+                    point.x, point.y, name,
+                    fontsize=6.5,
+                    fontweight="bold",
+                    ha="center", va="center",
+                    color="black",
+                    zorder=10,
+                )
+                import matplotlib.patheffects as pe
+                label.set_path_effects([
+                    pe.withStroke(linewidth=2.2, foreground="white", alpha=0.9)
+                ])
+            except Exception:
+                pass
 
     # Title
     if start_date == end_date:
