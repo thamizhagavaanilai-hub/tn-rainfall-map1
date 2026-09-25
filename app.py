@@ -124,8 +124,15 @@ def find_column(columns, keywords):
 
 def find_rainfall_table(html):
     """
-    Find the TN-SMART table containing station, latitude,
-    longitude and rainfall values.
+    Find the TN-SMART station table.
+
+    Important:
+    TN-SMART's table contains:
+      Sl.No | Name | District/Taluk/Village | Started on |
+      Latitude | Longitude | Status | Rainfall recorded (in mm)
+
+    We identify the rainfall column explicitly so Sl.No is never
+    accidentally interpreted as rainfall.
     """
     try:
         tables = pd.read_html(io.StringIO(html))
@@ -133,93 +140,188 @@ def find_rainfall_table(html):
         return None
 
     for df in tables:
-        if df.empty:
+        if df.empty or len(df.columns) < 6:
             continue
 
-        # Flatten MultiIndex columns
+        # Flatten MultiIndex columns safely.
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = [
-                " ".join([str(x) for x in col if str(x) != "nan"]).strip()
-                for col in df.columns
-            ]
+            flat_columns = []
+            for col in df.columns:
+                parts = [
+                    str(x).strip()
+                    for x in col
+                    if str(x).strip().lower() not in ("nan", "none", "")
+                ]
+                flat_columns.append(" ".join(parts))
+            df.columns = flat_columns
 
         columns = list(df.columns)
-        normalized = [normalize_column_name(c) for c in columns]
+        normalized = {
+            c: normalize_column_name(c)
+            for c in columns
+        }
 
+        # --------------------------------------------------------
+        # Find latitude / longitude by exact semantic matching.
+        # --------------------------------------------------------
         lat_col = None
         lon_col = None
-        rain_col = None
+
+        for col, name in normalized.items():
+            if (
+                lat_col is None
+                and (
+                    name == "latitude"
+                    or name.endswith(" latitude")
+                    or "latitude" in name
+                )
+            ):
+                lat_col = col
+
+            if (
+                lon_col is None
+                and (
+                    name == "longitude"
+                    or name.endswith(" longitude")
+                    or "longitude" in name
+                )
+            ):
+                lon_col = col
+
+        if lat_col is None or lon_col is None:
+            continue
+
+        # --------------------------------------------------------
+        # Find rainfall column ONLY from an explicit rainfall name.
+        # Do NOT use a generic "rain" search.
+        # --------------------------------------------------------
+        rainfall_candidates = []
+
+        for col, name in normalized.items():
+            if (
+                "rainfall recorded" in name
+                or name.startswith("rainfall")
+                or "rainfall" in name
+            ):
+                rainfall_candidates.append(col)
+
+        # Prefer the column containing "rainfall recorded".
+        exact_candidates = [
+            c for c in rainfall_candidates
+            if "rainfall recorded" in normalized[c]
+        ]
+
+        if exact_candidates:
+            rain_col = exact_candidates[0]
+        elif rainfall_candidates:
+            rain_col = rainfall_candidates[0]
+        else:
+            # TN-SMART currently places rainfall as the final table column.
+            # Use this only after confirming latitude/longitude exist.
+            rain_col = columns[-1]
+
+        # --------------------------------------------------------
+        # Station name
+        # --------------------------------------------------------
         station_col = None
 
-        for c, n in zip(columns, normalized):
-            if lat_col is None and ("latitude" in n or n == "lat"):
-                lat_col = c
-
-            if lon_col is None and (
-                "longitude" in n or "long" in n or n == "lon"
+        for col, name in normalized.items():
+            if (
+                "name of the station" in name
+                or name == "name of the station"
+                or name.startswith("name of the station")
             ):
-                lon_col = c
+                station_col = col
+                break
 
-            if rain_col is None and (
-                "rainfall" in n
-                or "rainfall recorded" in n
-                or "rain" in n
-                or "recorded rain" in n
-            ):
-                rain_col = c
-
-            if station_col is None and (
-                "name of the station" in n
-                or "station" in n
-                or "rain gauge station" in n
-            ):
-                station_col = c
-
-        if lat_col and lon_col and rain_col:
-            out = pd.DataFrame()
-
-            out["station"] = (
-                df[station_col].astype(str)
-                if station_col
-                else "Unknown Station"
-            )
-
-            out["latitude"] = df[lat_col].apply(clean_number)
-            out["longitude"] = df[lon_col].apply(clean_number)
-            out["rainfall_mm"] = df[rain_col].apply(clean_number)
-
-            # Optional district extraction from the district/taluk/village column
-            district_col = None
-            for c, n in zip(columns, normalized):
+        if station_col is None:
+            for col, name in normalized.items():
                 if (
-                    "district" in n
-                    and "taluk" in n
-                    and "village" in n
+                    "station" in name
+                    and "rainfall" not in name
                 ):
-                    district_col = c
+                    station_col = col
                     break
 
-            if district_col:
-                out["district_info"] = df[district_col].astype(str)
-            else:
-                out["district_info"] = ""
+        # --------------------------------------------------------
+        # Build result
+        # --------------------------------------------------------
+        out = pd.DataFrame()
 
-            out = out.replace([np.inf, -np.inf], np.nan)
-            out = out.dropna(
-                subset=["latitude", "longitude", "rainfall_mm"]
+        if station_col is not None:
+            out["station"] = df[station_col].astype(str).str.strip()
+        else:
+            out["station"] = "Unknown Station"
+
+        out["latitude"] = df[lat_col].apply(clean_number)
+        out["longitude"] = df[lon_col].apply(clean_number)
+        out["rainfall_mm"] = df[rain_col].apply(clean_number)
+
+        # District/Taluk/Village is optional.
+        district_col = None
+        for col, name in normalized.items():
+            if (
+                "district" in name
+                and "taluk" in name
+                and "village" in name
+            ):
+                district_col = col
+                break
+
+        if district_col is not None:
+            out["district_info"] = (
+                df[district_col].astype(str).str.strip()
             )
+        else:
+            out["district_info"] = ""
 
-            # Tamil Nadu approximate geographic extent
-            out = out[
-                out["latitude"].between(7.5, 14.0)
-                & out["longitude"].between(74.5, 80.5)
+        out = out.replace([np.inf, -np.inf], np.nan)
+
+        # --------------------------------------------------------
+        # Remove invalid rows.
+        # --------------------------------------------------------
+        out = out.dropna(
+            subset=[
+                "latitude",
+                "longitude",
+                "rainfall_mm",
             ]
+        )
 
-            # Rainfall cannot be negative
-            out.loc[out["rainfall_mm"] < 0, "rainfall_mm"] = 0
+        out = out[
+            out["latitude"].between(7.0, 14.5)
+            & out["longitude"].between(74.0, 81.0)
+        ]
 
-            if len(out) >= 2:
-                return out.reset_index(drop=True)
+        # Rainfall cannot be negative.
+        out.loc[
+            out["rainfall_mm"] < 0,
+            "rainfall_mm"
+        ] = 0
+
+        # --------------------------------------------------------
+        # Critical sanity check:
+        # TN-SMART rainfall values are mm, while Sl.No values are
+        # integers such as 1, 2, 3... If the parser accidentally
+        # selected Sl.No, the mean/max would resemble station count.
+        # Reject that table rather than producing a false rainfall map.
+        # --------------------------------------------------------
+        if len(out) >= 2:
+            rain = out["rainfall_mm"]
+
+            # If every value is an integer and the maximum is close
+            # to the number of rows, it is likely Sl.No.
+            max_rain = float(rain.max())
+            row_count = len(out)
+
+            if (
+                max_rain >= 0.9 * row_count
+                and max_rain <= 1.1 * row_count
+                and rain.nunique() > max(10, row_count * 0.5)
+            ):
+                continue
+
+            return out.reset_index(drop=True)
 
     return None
 
@@ -334,6 +436,20 @@ def download_daily_rainfall(requested_date):
             )
 
             if df is not None:
+                # Sanity check before accepting the day's data.
+                # TN-SMART rainfall should not equal station serial
+                # numbers (1, 2, 3, ...).
+                if len(df) > 20:
+                    max_rain = float(df["rainfall_mm"].max())
+                    median_rain = float(df["rainfall_mm"].median())
+
+                    if (
+                        max_rain >= 0.9 * len(df)
+                        and max_rain <= 1.1 * len(df)
+                        and median_rain > 100
+                    ):
+                        continue
+
                 df["date"] = requested_date.isoformat()
                 return df
 
@@ -932,6 +1048,13 @@ if run_button:
                 "Average station rainfall",
                 f"{accumulated['rainfall_mm'].mean():.1f} mm",
             )
+
+        # Sanity information
+        st.caption(
+            f"Rainfall range: "
+            f"{accumulated['rainfall_mm'].min():.1f}–"
+            f"{accumulated['rainfall_mm'].max():.1f} mm"
+        )
 
         # Map
         with st.spinner("Creating IDW rainfall map..."):
